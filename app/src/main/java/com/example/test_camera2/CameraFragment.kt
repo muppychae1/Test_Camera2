@@ -16,7 +16,6 @@ import android.util.Log
 import android.util.Size
 import android.util.SparseIntArray
 import android.view.*
-import android.widget.SeekBar
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat.checkSelfPermission
 import androidx.fragment.app.Fragment
@@ -221,44 +220,44 @@ class CameraFragment : Fragment(),
             textureView.surfaceTextureListener = surfaceTextureListener
         }
 
-        binding.single.setOnClickListener {
-            Log.v(TAG, "[onResume] textureView width x height = ${textureView.width} x ${textureView.height}")
-            Log.v(TAG, "[onResume] Single Button Click")
-            isSingle = true
-            lockFocus()
-        }
-
-        binding.burst.setOnClickListener {
-            Log.v(TAG, "Burst Button Click")
-            isSingle = false
-            lockFocus()
-        }
-
-        binding.controlDistance.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                Log.v(TAG, "[setOnSeekBarChangeListener] progress = ${progress}, fromUser = ${fromUser}")
-//                val value = progress / 100f
-//                val focusDistance = minimumFocusDistance + (value * (hyperFocalDistance - minimumFocusDistance))
-                val captureBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-                captureBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-                val focusDistance = (minimumFocusDistance/binding.controlDistance.max.toFloat())*progress.toFloat()
-                Log.v(TAG, "[setOnSeekBarChangeListener] focusDistance = ${focusDistance}")
-                updatePreview(focusDistance)
-//                previewRequestBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistance)
-//                try {
-//                    captureSession!!.setRepeatingRequest(
-//                        previewRequestBuilder.build(),
-//                        captureCallback,
-//                        backgroundHandler
-//                    )
-//                } catch (e: CameraAccessException) {
-//                    e.printStackTrace()
-//                }
-            }
-
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
+//        binding.single.setOnClickListener {
+//            Log.v(TAG, "[onResume] textureView width x height = ${textureView.width} x ${textureView.height}")
+//            Log.v(TAG, "[onResume] Single Button Click")
+//            isSingle = true
+//            lockFocus()
+//        }
+//
+//        binding.burst.setOnClickListener {
+//            Log.v(TAG, "Burst Button Click")
+//            isSingle = false
+//            lockFocus()
+//        }
+//
+//        binding.controlDistance.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+//            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+//                Log.v(TAG, "[setOnSeekBarChangeListener] progress = ${progress}, fromUser = ${fromUser}")
+////                val value = progress / 100f
+////                val focusDistance = minimumFocusDistance + (value * (hyperFocalDistance - minimumFocusDistance))
+//                val captureBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+//                captureBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+//                val focusDistance = (minimumFocusDistance/binding.controlDistance.max.toFloat())*progress.toFloat()
+//                Log.v(TAG, "[setOnSeekBarChangeListener] focusDistance = ${focusDistance}")
+//                updatePreview(focusDistance)
+////                previewRequestBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistance)
+////                try {
+////                    captureSession!!.setRepeatingRequest(
+////                        previewRequestBuilder.build(),
+////                        captureCallback,
+////                        backgroundHandler
+////                    )
+////                } catch (e: CameraAccessException) {
+////                    e.printStackTrace()
+////                }
+//            }
+//
+//            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+//            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+//        })
 
     }
 
@@ -667,6 +666,21 @@ class CameraFragment : Fragment(),
 
         setUpCameraOutputs(width, height)
         configureTransform(width, height)
+
+        val statusBarHeight = getStatusBarHeightDP(requireContext())
+        val params: ViewGroup.LayoutParams = binding.bottomMenu.getLayoutParams()
+        val topMenuParams: ViewGroup.LayoutParams = binding.topMenu.getLayoutParams()
+        val displaySize = Point()
+        activity.windowManager.defaultDisplay.getSize(displaySize)
+//        params.height = textureView.height * 20 / 100 // 예시로 TextureView 높이의 20%로 설정
+        Log.v(TAG, "[openCamera] displaySize.y = ${displaySize.y} , " +
+                "topMenuParams.height = ${topMenuParams.height}, textureView.height = ${textureView.height}" +
+                " status Hieght = ${statusBarHeight}")
+        params.height = displaySize.y - topMenuParams.height - textureView.height - statusBarHeight
+        Log.v(TAG, "[openCamera] params.height : ${params.height}")
+
+        binding.bottomMenu.setLayoutParams(params)
+
         val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         try{
             if(!cameraOpenCloseLock.tryAcquire(2500, TimeUnit.MICROSECONDS)){
@@ -699,6 +713,15 @@ class CameraFragment : Fragment(),
         } finally {
             cameraOpenCloseLock.release()
         }
+    }
+
+    fun getStatusBarHeightDP(context: Context): Int {
+        var result = 0
+        val resourceId: Int = context.resources.getIdentifier("status_bar_height", "dimen", "android")
+        if (resourceId > 0) {
+            result = context.resources.getDimension(resourceId).toInt()
+        }
+        return result
     }
 
     companion object {
