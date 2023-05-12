@@ -220,6 +220,14 @@ class CameraFragment : Fragment(),
             textureView.surfaceTextureListener = surfaceTextureListener
         }
 
+        binding.modeRadioGroup.setOnCheckedChangeListener { group, checkedId ->
+            when(checkedId){
+                R.id.basicRadioBtn -> {
+
+                }
+            }
+        }
+
 //        binding.single.setOnClickListener {
 //            Log.v(TAG, "[onResume] textureView width x height = ${textureView.width} x ${textureView.height}")
 //            Log.v(TAG, "[onResume] Single Button Click")
