@@ -1,14 +1,17 @@
 package com.example.test_camera2
 
 import android.Manifest
+import android.animation.ObjectAnimator
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.*
 import android.hardware.camera2.*
+import android.media.Image
 import android.media.ImageReader
 import android.media.MediaPlayer
+import android.opengl.Visibility
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -16,13 +19,22 @@ import android.util.Log
 import android.util.Size
 import android.util.SparseIntArray
 import android.view.*
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.widget.ImageView
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat.checkSelfPermission
 import androidx.fragment.app.Fragment
 import com.example.test_camera2.CameraHelper.AutoFitTexutreView
 import com.example.test_camera2.CameraHelper.CompareSizesByArea
 import com.example.test_camera2.CameraHelper.ImageSaver
+import com.example.test_camera2.CameraHelper.OverlayView
 import com.example.test_camera2.databinding.FragmentCameraBinding
+import com.example.test_camera2.ml.LiteModelEfficientdetLite0DetectionMetadata1
+import org.tensorflow.lite.support.image.ImageProcessor
+import org.tensorflow.lite.support.image.TensorImage
+import org.tensorflow.lite.support.image.ops.ResizeOp
 import java.util.*
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
@@ -49,7 +61,49 @@ class CameraFragment : Fragment(),
 
         override fun onSurfaceTextureDestroyed(texture: SurfaceTexture) = true
 
-        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+//        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
+//            imageView.visibility = View.GONE
+//            if(state == STATE_WAITING_LOCK){
+                imageView.visibility = View.VISIBLE
+                bitmap = textureView.bitmap!!
+
+                // Creates inputs for reference.
+                var image = TensorImage.fromBitmap(bitmap)
+                image = imageProcessor.process(image)
+
+                // Runs model inference and gets result.
+                val outputs = model.process(image)
+//            val detectionResult = outputs.detectionResultList.get(0)
+
+                // Gets result from DetectionResult.
+                val locations = outputs.locationAsTensorBuffer.floatArray
+                val categories = outputs.categoryAsTensorBuffer.floatArray
+                val scores = outputs.scoreAsTensorBuffer.floatArray
+                val numberOfDetections = outputs.numberOfDetectionsAsTensorBuffer.floatArray
+
+                var mutable = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+                val canvas = Canvas(mutable)
+
+                val h = mutable.height
+                val w = mutable.width
+
+                paint.textSize = h/15f
+                paint.strokeWidth = h/85f
+                var x = 0
+                scores.forEachIndexed{ index, fl ->
+                    x = index
+                    x *=4
+                    if(fl >0.5) {
+                        paint.setColor(Color.RED)
+                        paint.style = Paint.Style.STROKE
+                        canvas.drawRect(RectF(locations.get(x+1)*w, locations.get(x)*h, locations.get(x+3)*w, locations.get(x+2)*h),paint)
+                    }
+                }
+                imageView.setImageBitmap(mutable)
+            }
+
+//}
 
     }
 
@@ -86,7 +140,10 @@ class CameraFragment : Fragment(),
 
         private fun process(result: CaptureResult) {
             when (state) {
-                STATE_PREVIEW -> Unit // Do nothing when the camera preview is working normally.
+                STATE_PREVIEW -> {
+                    Unit
+
+                } // Do nothing when the camera preview is working normally.
                 STATE_WAITING_LOCK -> capturePicture(result)
                 STATE_WAITING_PRECAPTURE -> {
                     // CONTROL_AE_STATE can be null on some devices
@@ -177,6 +234,23 @@ class CameraFragment : Fragment(),
 
     private var hyperFocalDistance : Float = 0F
 
+    private var checkedRadioBtnIndex : Int = 0
+
+    private lateinit var rotation: ObjectAnimator
+
+    private lateinit var modeRadioGroup : RadioGroup
+
+    lateinit var imageView:ImageView
+    lateinit var bitmap : Bitmap
+    lateinit var model : LiteModelEfficientdetLite0DetectionMetadata1
+    lateinit var imageProcessor: ImageProcessor
+    val paint = Paint()
+
+    data class DetectionResult(val boundingBox: RectF, val text: String)
+//    private lateinit var customObjectDetector: ObjectDetector
+    private lateinit var detectedList: List<DetectionResult>
+    private lateinit var overlayView: OverlayView
+
     /**
      * 백그라운드에서 카메라 관련 작업을 하는 스레드와 핸들러
      */
@@ -184,6 +258,12 @@ class CameraFragment : Fragment(),
     private var backgroundHandler: Handler? = null
 
     private lateinit var textureView : AutoFitTexutreView
+
+    data class Recognition(
+        val id: String,
+        val confidence: Float,
+        val location: RectF
+    )
 
     override fun onAttach(context: Context) {
         super.onAttach(context)
@@ -195,12 +275,69 @@ class CameraFragment : Fragment(),
         savedInstanceState: Bundle?
     ): View? {
         binding = FragmentCameraBinding.inflate(inflater, container, false)
+        textureView = binding.textureView
+        modeRadioGroup = binding.modeRadioGroup
+        overlayView = binding.overlayView
+        mediaPlayer = MediaPlayer.create(context, R.raw.end_sound)
+        imageView = binding.imageView
+        imageProcessor = ImageProcessor.Builder().add(ResizeOp(320, 320, ResizeOp.ResizeMethod.BILINEAR)).build()
+        model = LiteModelEfficientdetLite0DetectionMetadata1.newInstance(requireContext())
+//        setDetector()
+
         return binding.root
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        textureView = binding.textureView
-        mediaPlayer = MediaPlayer.create(context, R.raw.end_sound)
+
+
+        binding.shutterBtn.viewTreeObserver.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                binding.shutterBtn.viewTreeObserver.removeOnGlobalLayoutListener(this)
+
+                // 뷰의 중심점을 계산합니다.
+                val centerX = binding.shutterBtn.width / 2f
+                val centerY = binding.shutterBtn.height / 2f
+
+                // 뷰를 회전시키는 애니메이션을 생성합니다.
+                rotation = ObjectAnimator.ofFloat(binding.shutterBtn, View.ROTATION, 0f, 360f)
+                rotation.apply {
+                    duration = 1000 // 애니메이션 시간 (밀리초)
+                    interpolator = AccelerateDecelerateInterpolator() // 가속도 감속도 애니메이션 인터폴레이터
+                    repeatCount = ObjectAnimator.INFINITE // 애니메이션 반복 횟수 (INFINITE: 무한반복)
+                    repeatMode = ObjectAnimator.RESTART // 애니메이션 반복 모드 (RESTART: 처음부터 다시 시작)
+
+                }
+            }
+        })
+
+        // 셔터 버튼 눌렸을 때
+        binding.shutterBtn.setOnClickListener {
+            rotation.start()
+        }
+
+        // 카메라 촬영 모드
+        modeRadioGroup.setOnCheckedChangeListener { group, checkedId ->
+            checkedRadioBtnIndex = modeRadioGroup.indexOfChild(modeRadioGroup.findViewById<RadioButton>(checkedId))
+
+            // 선택된 라디오 버튼 Bold
+            for (i in 0 until modeRadioGroup.childCount){
+                val radioBtn = modeRadioGroup.getChildAt(i) as RadioButton
+                if (radioBtn.id == checkedId){
+                    radioBtn.setTypeface(null, Typeface.BOLD)
+                } else {
+                    radioBtn.setTypeface(null, Typeface.NORMAL)
+                }
+            }
+
+            when(checkedId){
+                R.id.basicRadioBtn -> {
+                    binding.basicToggleBtn.visibility = View.VISIBLE
+                }
+                else -> {
+                    binding.basicToggleBtn.visibility = View.INVISIBLE
+                }
+            }
+        }
     }
 
     override fun onStart() {
@@ -220,13 +357,23 @@ class CameraFragment : Fragment(),
             textureView.surfaceTextureListener = surfaceTextureListener
         }
 
-        binding.modeRadioGroup.setOnCheckedChangeListener { group, checkedId ->
-            when(checkedId){
-                R.id.basicRadioBtn -> {
+        // 이전에 선택한 mode로 보여주기
+        val sharedPref = activity?.getPreferences(Context.MODE_PRIVATE)
+        val checkedRadioBtnIndexShare = sharedPref?.getInt("checkedRadioBtnIndex", 0)
 
-                }
+        Log.v(TAG, "[onResume] checkedRadioBtnIndexShare = ${checkedRadioBtnIndexShare}")
+
+        for (i in 0 until modeRadioGroup.childCount){
+            val radioBtn = modeRadioGroup.getChildAt(i) as RadioButton
+            Log.v(TAG, "[onResume] radioBtn.id = ${radioBtn.id}")
+            if (radioBtn.id == checkedRadioBtnIndexShare){
+                Log.v(TAG, "[onResume] checkedRadioBtnIndexShare = ${checkedRadioBtnIndexShare} radioBtn.id = ${radioBtn.id}")
+                radioBtn.isChecked = true
+                radioBtn.setTypeface(null, Typeface.BOLD)
+                break
             }
         }
+
 
 //        binding.single.setOnClickListener {
 //            Log.v(TAG, "[onResume] textureView width x height = ${textureView.width} x ${textureView.height}")
@@ -272,7 +419,20 @@ class CameraFragment : Fragment(),
     override fun onPause() {
         closeCamera()
         stopBackgroundThread()
+
+        // 선택된 mode 기억하기
+        val sharedPref = activity?.getPreferences(Context.MODE_PRIVATE)
+        with (sharedPref?.edit()) {
+            this?.putInt("checkedRadioBtnIndex", checkedRadioBtnIndex)
+//            this?.putBoolean("isToggleChecked", isToggleChecked)
+            this?.apply()
+        }
         super.onPause()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        model.close()
     }
 
     // 프리뷰 업데이트 메서드
@@ -320,6 +480,48 @@ class CameraFragment : Fragment(),
             ActivityCompat.requestPermissions(activity, rejectedPermissionList.toArray(array), REQUEST_PERMISSION)
         }
     }
+
+//    private fun setDetector() {
+//        // Step 2: Initialize the detector object
+//        val options = ObjectDetector.ObjectDetectorOptions.builder()
+//            .setMaxResults(5)          // 최대 결과 (모델에서 감지해야 하는 최대 객체 수)
+//            .setScoreThreshold(0.2f)   // 점수 임계값 (감지된 객체를 반환하는 객체 감지기의 신뢰도)
+//            .build()
+//
+////        customObjectDetector = ObjectDetector.createFromFileAndOptions(
+////            activity,
+////            "efficientdet-lite0.tflite",
+////            options)
+//
+//        try {
+//            customObjectDetector =
+//                ObjectDetector.createFromFileAndOptions(context, "efficientdet-lite0.tflite", options)
+//        } catch (e: IllegalStateException) {
+//            Log.e("Test", "TFLite failed to load model with error: " + e.message)
+//        }
+//    }
+//
+//    private fun processFrame(bitmap: Bitmap) {
+//        val image = TensorImage.fromBitmap(bitmap)
+//        // 객체 감지 수행
+//        val results = customObjectDetector.detect(image)
+//// Step 4: Parse the detection result and show it
+//        val resultToDisplay = results.map {
+//            // Get the top-1 category and craft the display text
+//            val category = it.categories.first()
+//            val text = "${category.label}"
+//
+//            // Create a data object to display the detection result
+//            DetectionResult(it.boundingBox, text)
+//        }
+//        // 결과 표시
+//        showDetectionResults(resultToDisplay)
+//    }
+//
+//    // processFrame 함수에서 객체 감지 결과를 overlayView에 전달합니다.
+//    private fun showDetectionResults(detections: List<DetectionResult>) {
+//        overlayView.updateResults(detections)
+//    }
 
     /**
      * startBackgroundThread()
@@ -489,8 +691,25 @@ class CameraFragment : Fragment(),
                         setAutoFlash(previewRequestBuilder)
 
                         previewRequest = previewRequestBuilder.build()
+
+                        //************** new *****************
+//                        val previewCallback = object : CameraCaptureSession.CaptureCallback() {
+//                            override fun onCaptureCompleted(
+//                                session: CameraCaptureSession,
+//                                request: CaptureRequest,
+//                                result: TotalCaptureResult
+//                            ) {
+//                                val bitmap = // 프레임을 Bitmap으로 변환하는 로직 (생략)
+//                                processFrame(bitmap)
+//                            }
+//                        }
+//                        captureSession?.setRepeatingRequest(previewRequest,
+//                            previewCallback, backgroundHandler)
+                        //*********************************//
+
                         captureSession?.setRepeatingRequest(previewRequest,
                             captureCallback, backgroundHandler)
+
                     }catch (e: CameraAccessException) {
                         Log.e(TAG, e.toString())
                     }
@@ -577,6 +796,7 @@ class CameraFragment : Fragment(),
                 // We fit the aspect ratio of TextureView to the size of preview we picked.
                 if (resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
                     textureView.setAspectRatio(previewSize.width, previewSize.height)
+
                 } else {
                     textureView.setAspectRatio(previewSize.height, previewSize.width)
                 }
@@ -732,7 +952,7 @@ class CameraFragment : Fragment(),
         return result
     }
 
-    companion object {
+    companion object{
         private val TAG = "CameraFragment"
         private val REQUIRED_PERMISSIONS = arrayOf(Manifest.permission.CAMERA,
                                                 Manifest.permission.RECORD_AUDIO)
@@ -742,6 +962,10 @@ class CameraFragment : Fragment(),
 
         private val MAX_PREVIEW_WIDTH = 1920
         private val MAX_PREVIEW_HEIGHT = 1080
+
+        private val INPUT_SIZE = 320
+        private val NUM_DETECTIONS = 5
+        private val MIN_CONFIDENCE = 0.2f
 
         /**
          * Camera state: Showing camera preview.
