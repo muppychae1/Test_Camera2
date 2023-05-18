@@ -6,4 +6,8 @@
     <string name="object_focus_option">Object Focus</string>
     <string name="distance_focus_option">Distance Focus</string>
     <string name="auto_rewind_option">Auto Rewind</string>
+    <string name="distance_manual">수동</string>
+    <string name="distance_auto">자동</string>
+    <string name="distance_manual_initial">M</string>
+    <string name="distance_auto_initial">A</string>
 </resources>
