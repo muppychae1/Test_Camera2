@@ -3,9 +3,11 @@ package com.example.test_camera2.CameraHelper
 import android.content.ContentValues
 import android.content.Context
 import android.media.Image
+import android.media.MediaPlayer
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
+import com.example.test_camera2.R
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -46,6 +48,11 @@ internal class ImageSaver(
 //                }
 //            }
 //        }
+
+        val mediaPlayer = MediaPlayer.create(context, R.raw.end_sound)
+
+
+
         val resolver = context.contentResolver
         val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
         val contentValues = ContentValues().apply {
@@ -64,6 +71,7 @@ internal class ImageSaver(
             output?.use {
                 it.write(bytes)
             }
+            mediaPlayer.start()
         } catch (e: IOException) {
             Log.e(TAG, e.toString())
         } finally {

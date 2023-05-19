@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.*
 import android.hardware.camera2.*
+import android.hardware.camera2.params.MeteringRectangle
 import android.media.ImageReader
 import android.media.MediaPlayer
 import android.os.Bundle
@@ -22,6 +23,7 @@ import android.widget.ImageView
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.ContextCompat.checkSelfPermission
 import androidx.fragment.app.Fragment
 import com.example.test_camera2.CameraHelper.AutoFitTexutreView
@@ -29,8 +31,6 @@ import com.example.test_camera2.CameraHelper.CompareSizesByArea
 import com.example.test_camera2.CameraHelper.ImageSaver
 import com.example.test_camera2.databinding.FragmentCameraBinding
 import com.example.test_camera2.ml.LiteModelEfficientdetLite0DetectionMetadata1
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
@@ -81,23 +81,50 @@ class CameraFragment : Fragment(),
 
                 var mutable = bitmap.copy(Bitmap.Config.ARGB_8888, true)
                 val canvas = Canvas(mutable)
+                val path = Path()
 
                 val h = mutable.height
                 val w = mutable.width
 
+                val rectLength = 120
+
                 paint.textSize = h/15f
-                paint.strokeWidth = h/85f
+                paint.strokeWidth = h/250f
                 var x = 0
                 var detectionCount = 0
                 scores.forEachIndexed{ index, fl ->
                     x = index
                     x *=4
                     if(fl >0.4) {
+                        if(detectionCount >= OBJECT_DETECT_SIZE) return
                         detectionCount += 1
-                        Log.v(TAG, "[onSurfaceTextureUpdated] dectionCount : ${detectionCount}")
-                        paint.setColor(Color.RED)
+                        paint.setColor(ContextCompat.getColor(requireContext(), R.color.focus))
                         paint.style = Paint.Style.STROKE
-                        canvas.drawRect(RectF(locations.get(x+1)*w, locations.get(x)*h, locations.get(x+3)*w, locations.get(x+2)*h),paint)
+
+                        val centerX = locations.get(x+1)*w + (locations.get(x+3)*w - locations.get(x+1)*w)/2
+                        val centerY = locations.get(x)*h + (locations.get(x+2)*h - locations.get(x)*h)/2
+
+                        path.moveTo(centerX - rectLength/2 - paint.strokeWidth/2, centerY - rectLength/2)
+                        path.lineTo(centerX - rectLength/2 + rectLength/3, centerY - rectLength/2)
+                        path.moveTo(centerX - rectLength/2 + 2*(rectLength/3), centerY - rectLength/2)
+                        path.lineTo(centerX + rectLength/2, centerY - rectLength/2)
+
+                        path.lineTo(centerX + rectLength/2, centerY - rectLength/2 + rectLength/3)
+                        path.moveTo(centerX + rectLength/2, centerY - rectLength/2 + 2*(rectLength/3))
+                        path.lineTo(centerX + rectLength/2, centerY + rectLength/2)
+
+                        path.lineTo(centerX + rectLength/2 - rectLength/3, centerY + rectLength/2)
+                        path.moveTo(centerX + rectLength/2 - 2*(rectLength/3), centerY + rectLength/2)
+                        path.lineTo(centerX - rectLength/2, centerY + rectLength/2)
+
+                        path.lineTo(centerX - rectLength/2, centerY + rectLength/2 - rectLength/3)
+                        path.moveTo(centerX - rectLength/2, centerY + rectLength/2 - 2*(rectLength/3))
+                        path.lineTo(centerX - rectLength/2, centerY - rectLength/2)
+
+                        path.close()
+                        canvas.drawPath(path, paint)
+//                        canvas.drawRect(RectF(locations.get(x+1)*w, locations.get(x)*h, locations.get(x+3)*w, locations.get(x+2)*h),paint)
+
                     }
                 }
                 imageView.setImageBitmap(mutable)
@@ -205,17 +232,17 @@ class CameraFragment : Fragment(),
 
     private lateinit var previewSize: Size
 
-    private lateinit var previewRequestBuilder: CaptureRequest.Builder
+    public lateinit var previewRequestBuilder: CaptureRequest.Builder
 
     private var flashSupported = false
 
-    private lateinit var cameraId: String
+    public lateinit var cameraId: String
 
     private val cameraOpenCloseLock = Semaphore(1)
 
     private var cameraDevice: CameraDevice? = null
 
-    private var captureSession: CameraCaptureSession? = null
+    var captureSession: CameraCaptureSession? = null
 
     private lateinit var previewRequest: CaptureRequest
 
@@ -249,6 +276,8 @@ class CameraFragment : Fragment(),
 
     private var startObjectDetection = false
 
+    private var manualFocusEngaged = false
+
     /**
      * 백그라운드에서 카메라 관련 작업을 하는 스레드와 핸들러
      */
@@ -270,6 +299,7 @@ class CameraFragment : Fragment(),
 
         return binding.root
     }
+
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         // 초기화
@@ -318,7 +348,9 @@ class CameraFragment : Fragment(),
             // Object Focus 모드 촬영
             else if(binding.objectFocusRadioBtn.isChecked){
                 isObjectFocus = true
+
                 // TODO : Object Detection 촬영
+
             }
             //Distance Focus 모드 촬영
             else if(binding.distanceFocusRadioBtn.isChecked){
@@ -353,27 +385,145 @@ class CameraFragment : Fragment(),
                     showRelatedView(true, false, false)
                 R.id.objectFocusRadioBtn ->
                     showRelatedView(false, true, false)
-                R.id.distanceFocusRadioBtn ->
+                R.id.distanceFocusRadioBtn -> {
                     showRelatedView(false, false, true)
+                    binding.distanceManualRadioBtn.isChecked = true
+                }
                 R.id.autoRewindRadioBtn ->
                     showRelatedView(false, false, false)
             }
         } // end of modeRadioGroup.setOnCheckedChangeListener...
 
+        // distance 수동, 자동 Btn
         distanceOptionRadioGroup.setOnCheckedChangeListener { group, checkedId ->
-            // TODO : Manual과 Auto에 따라 seekbar 유무 + 라디오 버튼 글씨 크기
+            // TODO : Manual과 Auto에 따라 seekbar 유무 + tv 색상 변경
             when(checkedId){
                 // 수동
                 R.id.distanceManualRadioBtn -> {
                     binding.seekBarLinearLayout.visibility = View.VISIBLE
+                    binding.distanceManualTv.setTextColor(ContextCompat.getColor(requireContext(), R.color.white))
+                    binding.distanceAutoTv.setTextColor(ContextCompat.getColor(requireContext(), R.color.middle_gray_80))
                 }
                 // 자동
                 R.id.distanceAutoRadioBtn -> {
                     binding.seekBarLinearLayout.visibility = View.GONE
+                    binding.distanceManualTv.setTextColor(ContextCompat.getColor(requireContext(), R.color.middle_gray_80))
+                    binding.distanceAutoTv.setTextColor(ContextCompat.getColor(requireContext(), R.color.white))
                 }
             }
         }
 
+        @Suppress("ClickableViewAccessibility")
+        textureView.setOnTouchListener { view: View, motionEvent: MotionEvent ->
+            Log.v(TAG, "[textureView.setOnTouchListener] TOUCH!!!!!")
+            val actionMasked = motionEvent.actionMasked
+            if (actionMasked != MotionEvent.ACTION_DOWN)
+                return@setOnTouchListener false
+
+            if (manualFocusEngaged)
+                return@setOnTouchListener true
+
+            val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val characteristics = manager.getCameraCharacteristics(cameraId)
+            val sensorArraySize = characteristics[CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE]
+            val sensorOrientation = characteristics[CameraCharacteristics.SENSOR_ORIENTATION]
+
+            Log.v(TAG, "[setOnTouchListener] sensorArraySize height x width : ${sensorArraySize!!.height()} x ${sensorArraySize!!.width()}")
+            Log.v(TAG, "[setOnTouchListener] view height x width : ${view.height.toFloat()} x ${view.width.toFloat()}")
+            Log.v(TAG, "[setOnTouchListener] motionEvent X x Y : ${motionEvent.x} x ${motionEvent.y}")
+
+            val halfTouchWidth = 100
+            val halfTouchHeight = 100
+
+            val x = motionEvent.x
+            val y = motionEvent.y
+
+            val textureViewWidth = view.width
+            val textureViewHeight = view.height
+
+            val sensorWidth = sensorArraySize!!.width()
+            val sensorHeight = sensorArraySize.height()
+
+            // Calculate the touch point coordinates relative to the sensor area
+            val touchPointX = (x / textureViewWidth) * sensorWidth
+            val touchPointY = (y / textureViewHeight) * sensorHeight
+
+
+            val rotatedTouchPointX: Float
+            val rotatedTouchPointY: Float
+            when (sensorOrientation) {
+                90 -> {
+                    rotatedTouchPointX = touchPointY
+                    rotatedTouchPointY = sensorHeight - touchPointX
+                }
+                180 -> {
+                    rotatedTouchPointX = sensorWidth - touchPointX
+                    rotatedTouchPointY = sensorHeight - touchPointY
+                }
+                270 -> {
+                    rotatedTouchPointX = sensorWidth - touchPointY
+                    rotatedTouchPointY = touchPointX
+                }
+                else -> {
+                    rotatedTouchPointX = touchPointX
+                    rotatedTouchPointY = touchPointY
+                }
+            }
+
+            val focusAreaTouch = MeteringRectangle(
+                maxOf(rotatedTouchPointX.toInt(), 0),
+                maxOf(rotatedTouchPointY.toInt(), 0),
+                halfTouchWidth * 2,
+                halfTouchHeight * 2,
+                MeteringRectangle.METERING_WEIGHT_MAX - 1
+            )
+
+            Log.v(TAG, "[setOnTouchListener] focusAreaTouch X x Y : ${focusAreaTouch.x} x ${focusAreaTouch.y}")
+
+            val captureCallbackHandler = object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                    super.onCaptureCompleted(session, request, result)
+                    manualFocusEngaged = false
+                    Log.v(TAG, "[setOnTouchListener] request.tag = ${request.tag}")
+                    if (request.tag == "FOCUS_TAG") {
+                        // the focus trigger is complete -
+                        // resume repeating (preview surface will get frames), clear AF trigger
+                        previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, null)
+                        captureSession!!.setRepeatingRequest(previewRequestBuilder.build(), captureCallback, backgroundHandler)
+
+                    }
+                }
+
+                override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                    super.onCaptureFailed(session, request, failure)
+                    Log.e(TAG, "Manual AF failure: $failure")
+                    manualFocusEngaged = false
+                }
+            }
+
+            // first stop the existing repeating request
+            captureSession!!.stopRepeating()
+
+            // cancel any existing AF trigger (repeated touches, etc.)
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_CANCEL)
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+            captureSession!!.capture(previewRequestBuilder.build(), captureCallbackHandler, backgroundHandler)
+
+            // Now add a new AF trigger with focus region
+            if (isMeteringAreaAFSupported(characteristics)) {
+                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(focusAreaTouch))
+            }
+            previewRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+            previewRequestBuilder.setTag("FOCUS_TAG") // we'll capture this later for resuming the preview
+
+            // then we ask for a single request (not repeating!)
+            captureSession!!.capture(previewRequestBuilder.build(), captureCallbackHandler, backgroundHandler)
+            manualFocusEngaged = true
+
+            return@setOnTouchListener true
+        }
     }
 
     override fun onStart() {
@@ -381,6 +531,7 @@ class CameraFragment : Fragment(),
         Log.v(TAG, "[onStart] !!")
     }
 
+    @SuppressLint("ClickableViewAccessibility")
     override fun onResume() {
         super.onResume()
         startBackgroundThread()
@@ -407,8 +558,6 @@ class CameraFragment : Fragment(),
                 break
             }
         }
-
-
 //
 //        binding.controlDistance.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
 //            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
@@ -457,6 +606,10 @@ class CameraFragment : Fragment(),
     override fun onDestroy() {
         super.onDestroy()
         model.close()
+    }
+
+    private fun isMeteringAreaAFSupported(characteristics: CameraCharacteristics): Boolean {
+        return characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF)!! >= 1
     }
 
     private fun showRelatedView(basic: Boolean, objectF: Boolean, distanceF: Boolean){
@@ -992,6 +1145,8 @@ class CameraFragment : Fragment(),
         private val STATE_PICTURE_TAKEN = 4
 
         private val BURST_SIZE = 10
+
+        private val OBJECT_DETECT_SIZE = 5
 
         @JvmStatic private fun chooseOptimalSize(
             choices: Array<Size>,

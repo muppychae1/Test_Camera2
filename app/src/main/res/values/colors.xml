@@ -9,10 +9,12 @@
     <color name="white">#FFFFFFFF</color>
     <color name="test">#E6E6E6</color>
 
-    <color name="white_90">#E6FFFFFF</color>
+    <color name="white_85">#D9FFFFFF</color>
     <color name="dark_purple">#9177D0</color>
-    <color name="dark_purple_90">#E69177D0</color>
+    <color name="dark_purple_85">#D99177D0</color>
     <color name="middle_gray">#6B6B6B</color>
     <color name="middle_gray_80">#CC6B6B6B</color>
     <color name="purple_gray">#B5B2CA</color>
+    <color name="point_color">#C1BAF2</color>
+    <color name="focus">#FFEA00</color>
 </resources>
