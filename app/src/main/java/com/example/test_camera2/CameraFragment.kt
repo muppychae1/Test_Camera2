@@ -22,15 +22,22 @@ import android.view.animation.AccelerateDecelerateInterpolator
 import android.widget.ImageView
 import android.widget.RadioButton
 import android.widget.RadioGroup
+import android.widget.SeekBar
+import androidx.camera.core.MeteringPoint
+import androidx.constraintlayout.widget.ConstraintSet.Motion
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.ContextCompat.checkSelfPermission
 import androidx.fragment.app.Fragment
 import com.example.test_camera2.CameraHelper.AutoFitTexutreView
 import com.example.test_camera2.CameraHelper.CompareSizesByArea
+import com.example.test_camera2.CameraHelper.FocusTool
 import com.example.test_camera2.CameraHelper.ImageSaver
 import com.example.test_camera2.databinding.FragmentCameraBinding
 import com.example.test_camera2.ml.LiteModelEfficientdetLite0DetectionMetadata1
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import org.tensorflow.lite.support.image.ImageProcessor
 import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
@@ -74,9 +81,9 @@ class CameraFragment : Fragment(),
                 val outputs = model.process(image)
 
                 // Gets result from DetectionResult.
-                val locations = outputs.locationAsTensorBuffer.floatArray
+                locations = outputs.locationAsTensorBuffer.floatArray
                 val categories = outputs.categoryAsTensorBuffer.floatArray
-                val scores = outputs.scoreAsTensorBuffer.floatArray
+                scores = outputs.scoreAsTensorBuffer.floatArray
                 val numberOfDetections = outputs.numberOfDetectionsAsTensorBuffer.floatArray
 
                 var mutable = bitmap.copy(Bitmap.Config.ARGB_8888, true)
@@ -94,8 +101,8 @@ class CameraFragment : Fragment(),
                 var detectionCount = 0
                 scores.forEachIndexed{ index, fl ->
                     x = index
-                    x *=4
-                    if(fl >0.4) {
+                    x *= 4
+                    if(fl > OBJECT_DETECT_PERCENTAGE) {
                         if(detectionCount >= OBJECT_DETECT_SIZE) return
                         detectionCount += 1
                         paint.setColor(ContextCompat.getColor(requireContext(), R.color.focus))
@@ -135,9 +142,11 @@ class CameraFragment : Fragment(),
     }
 
     private val onImageAvailableListener = ImageReader.OnImageAvailableListener {
-        mediaPlayer.start()
+        Log.v("chaewon", "onImageAvailableListener")
         backgroundHandler?.post(ImageSaver(it.acquireNextImage(), requireContext()))
+//        ImageSaver(it.acquireNextImage(), requireContext()).run()
     }
+
 
     private val stateCallback = object : CameraDevice.StateCallback() {
 
@@ -191,12 +200,14 @@ class CameraFragment : Fragment(),
 
         private fun capturePicture(result: CaptureResult) {
             val afState = result.get(CaptureResult.CONTROL_AF_STATE)
+            Log.v("chaewon", "$afState check")
             if (afState == null) {
                 captureStillPicture()
             } else if (afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED
                 || afState == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED
                 || afState == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED) {
                 // CONTROL_AE_STATE can be null on some devices
+                Log.v("chaewon", "지나가니 $afState")
                 val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
                 if (aeState == null || aeState == CaptureResult.CONTROL_AE_STATE_CONVERGED) {
                     state = STATE_PICTURE_TAKEN
@@ -206,6 +217,9 @@ class CameraFragment : Fragment(),
                     runPrecaptureSequence()
                 }
             }
+//            else if (afState == CaptureResult.CONTROL_AF_STATE_INACTIVE){
+//                captureStillPicture()
+//            }
         }
 
         override fun onCaptureProgressed(session: CameraCaptureSession,
@@ -222,7 +236,7 @@ class CameraFragment : Fragment(),
 
     }
 
-    private lateinit var activity :MainActivity
+    lateinit var activity :MainActivity
 
     private lateinit var binding : FragmentCameraBinding
 
@@ -232,11 +246,11 @@ class CameraFragment : Fragment(),
 
     private lateinit var previewSize: Size
 
-    public lateinit var previewRequestBuilder: CaptureRequest.Builder
+    private lateinit var previewRequestBuilder: CaptureRequest.Builder
 
     private var flashSupported = false
 
-    public lateinit var cameraId: String
+    lateinit var cameraId: String
 
     private val cameraOpenCloseLock = Semaphore(1)
 
@@ -278,13 +292,22 @@ class CameraFragment : Fragment(),
 
     private var manualFocusEngaged = false
 
+    data class CenterPoint(val centerX: Float, val centerY: Float)
+    private val detectionCenterPointList = ArrayList<CenterPoint>()
+    private lateinit var locations : FloatArray
+    private lateinit var scores : FloatArray
+    private lateinit var FocusTool: FocusTool
+    private var isFocusSuccessful = false
+    private var detectionIndex = 0
+
+
     /**
      * 백그라운드에서 카메라 관련 작업을 하는 스레드와 핸들러
      */
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
 
-    private lateinit var textureView : AutoFitTexutreView
+    lateinit var textureView : AutoFitTexutreView
 
     override fun onAttach(context: Context) {
         super.onAttach(context)
@@ -310,6 +333,7 @@ class CameraFragment : Fragment(),
         imageView = binding.imageView
         imageProcessor = ImageProcessor.Builder().add(ResizeOp(320, 320, ResizeOp.ResizeMethod.BILINEAR)).build()
         model = LiteModelEfficientdetLite0DetectionMetadata1.newInstance(requireContext())
+        FocusTool = FocusTool(this@CameraFragment)
 
         imageView.visibility = View.GONE
 
@@ -347,9 +371,33 @@ class CameraFragment : Fragment(),
             }
             // Object Focus 모드 촬영
             else if(binding.objectFocusRadioBtn.isChecked){
-                isObjectFocus = true
+                detectionIndex = 0
+                detectionCenterPointList.clear()
 
-                // TODO : Object Detection 촬영
+                var mutable = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+                val h = mutable.height
+                val w = mutable.width
+
+                var x = 0
+                var detectionCount = 0
+                scores.forEachIndexed { index, fl ->
+                    x = index
+                    x *= 4
+                    if (fl > OBJECT_DETECT_PERCENTAGE) {
+                        if (detectionCount >= OBJECT_DETECT_SIZE) return@forEachIndexed
+                        detectionCount += 1
+
+                        val centerX =
+                            locations.get(x + 1) * w + (locations.get(x + 3) * w - locations.get(x + 1) * w) / 2
+                        val centerY =
+                            locations.get(x) * h + (locations.get(x + 2) * h - locations.get(x) * h) / 2
+
+                        // 감지된 객체의 중앙 좌표 저장
+                        detectionCenterPointList.add(CenterPoint(centerX, centerY))
+                    }
+                }
+
+                takeObjectFocus()
 
             }
             //Distance Focus 모드 촬영
@@ -357,9 +405,11 @@ class CameraFragment : Fragment(),
                 isDistanceFocus = true
                 // 수동
                 if (binding.distanceManualRadioBtn.isChecked){
-                    // TODO : 수동 모드 촬영
-                } else {
+                    isSingle = true
+                    lockFocus()
+                } else { // 자동
                     // TODO : 자동 모드 촬영
+
                 }
 
             }
@@ -413,6 +463,19 @@ class CameraFragment : Fragment(),
             }
         }
 
+        // distance 수동 Seek Bar 조절
+        binding.distanceFocusSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                Log.v(TAG, "[setOnSeekBarChangeListener] progress = ${progress}, fromUser = ${fromUser}")
+                val focusDistance = (minimumFocusDistance/binding.distanceFocusSeekBar.max.toFloat())*progress.toFloat()
+                Log.v(TAG, "[setOnSeekBarChangeListener] focusDistance = ${focusDistance}")
+                updatePreview(focusDistance)
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+
         @Suppress("ClickableViewAccessibility")
         textureView.setOnTouchListener { view: View, motionEvent: MotionEvent ->
             Log.v(TAG, "[textureView.setOnTouchListener] TOUCH!!!!!")
@@ -425,58 +488,8 @@ class CameraFragment : Fragment(),
 
             val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val characteristics = manager.getCameraCharacteristics(cameraId)
-            val sensorArraySize = characteristics[CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE]
-            val sensorOrientation = characteristics[CameraCharacteristics.SENSOR_ORIENTATION]
 
-            Log.v(TAG, "[setOnTouchListener] sensorArraySize height x width : ${sensorArraySize!!.height()} x ${sensorArraySize!!.width()}")
-            Log.v(TAG, "[setOnTouchListener] view height x width : ${view.height.toFloat()} x ${view.width.toFloat()}")
-            Log.v(TAG, "[setOnTouchListener] motionEvent X x Y : ${motionEvent.x} x ${motionEvent.y}")
-
-            val halfTouchWidth = 100
-            val halfTouchHeight = 100
-
-            val x = motionEvent.x
-            val y = motionEvent.y
-
-            val textureViewWidth = view.width
-            val textureViewHeight = view.height
-
-            val sensorWidth = sensorArraySize!!.width()
-            val sensorHeight = sensorArraySize.height()
-
-            // Calculate the touch point coordinates relative to the sensor area
-            val touchPointX = (x / textureViewWidth) * sensorWidth
-            val touchPointY = (y / textureViewHeight) * sensorHeight
-
-
-            val rotatedTouchPointX: Float
-            val rotatedTouchPointY: Float
-            when (sensorOrientation) {
-                90 -> {
-                    rotatedTouchPointX = touchPointY
-                    rotatedTouchPointY = sensorHeight - touchPointX
-                }
-                180 -> {
-                    rotatedTouchPointX = sensorWidth - touchPointX
-                    rotatedTouchPointY = sensorHeight - touchPointY
-                }
-                270 -> {
-                    rotatedTouchPointX = sensorWidth - touchPointY
-                    rotatedTouchPointY = touchPointX
-                }
-                else -> {
-                    rotatedTouchPointX = touchPointX
-                    rotatedTouchPointY = touchPointY
-                }
-            }
-
-            val focusAreaTouch = MeteringRectangle(
-                maxOf(rotatedTouchPointX.toInt(), 0),
-                maxOf(rotatedTouchPointY.toInt(), 0),
-                halfTouchWidth * 2,
-                halfTouchHeight * 2,
-                MeteringRectangle.METERING_WEIGHT_MAX - 1
-            )
+            val focusAreaTouch = FocusTool.convertPointToMeteringRect(motionEvent.x, motionEvent.y)
 
             Log.v(TAG, "[setOnTouchListener] focusAreaTouch X x Y : ${focusAreaTouch.x} x ${focusAreaTouch.y}")
 
@@ -484,13 +497,11 @@ class CameraFragment : Fragment(),
                 override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
                     super.onCaptureCompleted(session, request, result)
                     manualFocusEngaged = false
-                    Log.v(TAG, "[setOnTouchListener] request.tag = ${request.tag}")
                     if (request.tag == "FOCUS_TAG") {
                         // the focus trigger is complete -
                         // resume repeating (preview surface will get frames), clear AF trigger
                         previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, null)
                         captureSession!!.setRepeatingRequest(previewRequestBuilder.build(), captureCallback, backgroundHandler)
-
                     }
                 }
 
@@ -558,32 +569,8 @@ class CameraFragment : Fragment(),
                 break
             }
         }
-//
-//        binding.controlDistance.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-//            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-//                Log.v(TAG, "[setOnSeekBarChangeListener] progress = ${progress}, fromUser = ${fromUser}")
-////                val value = progress / 100f
-////                val focusDistance = minimumFocusDistance + (value * (hyperFocalDistance - minimumFocusDistance))
-//                val captureBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
-//                captureBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
-//                val focusDistance = (minimumFocusDistance/binding.controlDistance.max.toFloat())*progress.toFloat()
-//                Log.v(TAG, "[setOnSeekBarChangeListener] focusDistance = ${focusDistance}")
-//                updatePreview(focusDistance)
-////                previewRequestBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, focusDistance)
-////                try {
-////                    captureSession!!.setRepeatingRequest(
-////                        previewRequestBuilder.build(),
-////                        captureCallback,
-////                        backgroundHandler
-////                    )
-////                } catch (e: CameraAccessException) {
-////                    e.printStackTrace()
-////                }
-//            }
-//
-//            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-//            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-//        })
+
+
 
     }
 
@@ -611,6 +598,89 @@ class CameraFragment : Fragment(),
     private fun isMeteringAreaAFSupported(characteristics: CameraCharacteristics): Boolean {
         return characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF)!! >= 1
     }
+
+    private fun takeObjectFocus(){
+        if(detectionIndex == detectionCenterPointList.size) {
+            unlockFocus()
+            return
+        }
+            isObjectFocus = true
+            val manager = activity.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val characteristics = manager.getCameraCharacteristics(cameraId)
+
+            Log.v("chaewon", "for 2 isObjectFocus : $isObjectFocus")
+            Log.v("chaewon", "for 3 state : $state")
+
+            val x = detectionCenterPointList[detectionIndex].centerX
+            val y = detectionCenterPointList[detectionIndex].centerY
+            val focusAreaTouch = FocusTool.convertPointToMeteringRect(x, y)
+
+            val captureCallbackHandler = object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureCompleted(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    result: TotalCaptureResult
+                ) {
+                    super.onCaptureCompleted(session, request, result)
+
+                    if (request.tag == "FOCUS_TAG") {
+                        // the focus trigger is complete -
+                        // resume repeating (preview surface will get frames), clear AF trigger
+                        previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, null)
+                        captureSession!!.setRepeatingRequest(
+                            previewRequestBuilder.build(),
+                            captureCallback,
+                            backgroundHandler
+                        )
+
+                        Log.v("chaewon", "complete")
+                        lockFocus()
+
+                    }
+                }
+
+                override fun onCaptureFailed(
+                    session: CameraCaptureSession,
+                    request: CaptureRequest,
+                    failure: CaptureFailure
+                ) {
+                    super.onCaptureFailed(session, request, failure)
+                    Log.e(TAG, "Manual AF failure: $failure")
+                }
+            }
+
+            // first stop the existing repeating request
+            captureSession!!.stopRepeating()
+
+//                 cancel any existing AF trigger (repeated touches, etc.)
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_CANCEL)
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+            captureSession!!.capture(previewRequestBuilder.build(), captureCallbackHandler, backgroundHandler)
+
+            // Now add a new AF trigger with focus region
+            if (isMeteringAreaAFSupported(characteristics)) {
+                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(focusAreaTouch))
+            }
+            captureSession!!.setRepeatingRequest(previewRequestBuilder.build(), captureCallbackHandler, backgroundHandler)
+
+
+
+            // Now add a new AF trigger with focus region
+            if (isMeteringAreaAFSupported(characteristics)) {
+                previewRequestBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, arrayOf(focusAreaTouch))
+            }
+            previewRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO)
+            previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+            previewRequestBuilder.setTag("FOCUS_TAG") // we'll capture this later for resuming the preview
+
+            Log.v("chaewon", "초점 !!!!!!!!!!!!!!!!!!!!")
+            captureSession!!.capture(previewRequestBuilder.build(), captureCallbackHandler, backgroundHandler)
+
+//        }
+
+    }
+
 
     private fun showRelatedView(basic: Boolean, objectF: Boolean, distanceF: Boolean){
         showBasicRelatedView(basic)
@@ -732,7 +802,8 @@ class CameraFragment : Fragment(),
     }
 
     private fun captureStillPicture() {
-        Log.v(TAG, "captureStillPicture() 진입")
+        Log.v("chaewon", "${detectionIndex} captureStillPicture() 진입")
+        Log.v("chaewon", "가")
         try {
             if (activity == null || cameraDevice == null) return
             val rotation = activity.windowManager.defaultDisplay.rotation
@@ -750,32 +821,75 @@ class CameraFragment : Fragment(),
                     (ORIENTATIONS.get(rotation) + sensorOrientation + 270) % 360)
 
                 // Use the same AE and AF modes as the preview.
+//                set(CaptureRequest.CONTROL_AF_MODE,
+//                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
                 set(CaptureRequest.CONTROL_AF_MODE,
-                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+                    CaptureRequest.CONTROL_AF_MODE_OFF)
             }?.also { setAutoFlash(it) }
-            Log.v(TAG, "captureBuilder 생성")
+            Log.v("chaewon", "나")
             val captureCallback = object : CameraCaptureSession.CaptureCallback() {
 
                 override fun onCaptureCompleted(session: CameraCaptureSession,
                                                 request: CaptureRequest,
                                                 result: TotalCaptureResult) {
+                    Log.v("chaewon", "타")
                     activity.runOnUiThread {
                         binding.shutterBtn.isEnabled = true // shutter Btn 활성화
                         shutterBtnRotation.cancel()
                     }
-                    mediaPlayer.start()
+
                     unlockFocus()
+
                 }
             }
+            val captureFocusCallback = object : CameraCaptureSession.CaptureCallback() {
+
+                override fun onCaptureCompleted(session: CameraCaptureSession,
+                                                request: CaptureRequest,
+                                                result: TotalCaptureResult) {
+                    Log.v("chaewon", "카")
+                    activity.runOnUiThread {
+                        binding.shutterBtn.isEnabled = true // shutter Btn 활성화
+                        shutterBtnRotation.cancel()
+                    }
+
+//                    unlockFocus()
+
+                    isObjectFocus = false
+                    detectionIndex+=1
+                    takeObjectFocus()
+
+                    Log.v("chaewon", "detectionIndex : $detectionIndex, deteionList.size : ${detectionCenterPointList.size}")
+
+
+                }
+            }
+            Log.v("chaewon", "다")
+            // Single 모드 일때, Object Focus 모드 일때,
             if(isSingle){
+                Log.v("chaewon", "라")
                 captureSession?.apply {
                     stopRepeating()
                     abortCaptures()
                     capture(captureBuilder?.build()!!, captureCallback, null)
                     isSingle = false
                 }
+                Log.v("chaewon", "마")
             }
+            Log.v("chaewon", "바")
+            if(isObjectFocus){
+                Log.v("chaewon", "사")
+                Log.v("chaewon", "captureStill object focus")
+                captureSession?.apply {
+                    stopRepeating()
+                    abortCaptures()
+                    capture(captureBuilder?.build()!!, captureFocusCallback, null)
+                }
+            }
+            Log.v("chaewon", "아")
+            // Burst 모드 일때
             if(isBurst){
+                Log.v("chaewon", "자")
                 captureSession?.apply {
                     stopRepeating()
                     abortCaptures()
@@ -791,6 +905,7 @@ class CameraFragment : Fragment(),
                     isBurst = false
                 }
             }
+            Log.v("chaewon", "차")
 
         } catch (e: CameraAccessException) {
             Log.e(TAG, e.toString())
@@ -803,6 +918,7 @@ class CameraFragment : Fragment(),
      */
     private fun lockFocus() {
         try {
+            Log.v("chaewon", "lockFocus")
             // This is how to tell the camera to lock focus.
             previewRequestBuilder.set(CaptureRequest.CONTROL_AF_TRIGGER,
                 CameraMetadata.CONTROL_AF_TRIGGER_START)
@@ -1147,6 +1263,8 @@ class CameraFragment : Fragment(),
         private val BURST_SIZE = 10
 
         private val OBJECT_DETECT_SIZE = 5
+
+        private val OBJECT_DETECT_PERCENTAGE = 0.4
 
         @JvmStatic private fun chooseOptimalSize(
             choices: Array<Size>,

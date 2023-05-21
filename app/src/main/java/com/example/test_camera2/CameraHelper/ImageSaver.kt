@@ -20,10 +20,6 @@ internal class ImageSaver(
      */
     private val image: Image,
 
-//    /**
-//     * The file we save the image into.
-//     */
-//    private val file: File
     private val context: Context
 ) : Runnable {
 
